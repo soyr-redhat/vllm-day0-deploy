@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: status [--name NAME] [--namespace NS]
+
+Show status of vLLM day-0 deployments.
+
+Options:
+  --name NAME       Show status for a specific deployment
+  --namespace NS    Target namespace (default: current project)
+  -h, --help        Show this help
+
+Without --name, lists all vLLM deployments in the namespace.
+EOF
+  exit 0
+}
+
+NAME=""
+NAMESPACE=""
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --name)       NAME="$2";      shift 2 ;;
+    --namespace)  NAMESPACE="$2"; shift 2 ;;
+    -h|--help)    usage ;;
+    *) echo "Error: unknown option: $1" >&2; exit 1 ;;
+  esac
+done
+
+if [[ -z "$NAMESPACE" ]]; then
+  NAMESPACE=$(oc project -q 2>/dev/null) || { echo "Error: not logged into OpenShift" >&2; exit 1; }
+fi
+
+if [[ -n "$NAME" ]]; then
+  echo "=== Deployment: ${NAME} ==="
+  oc get deployment "${NAME}" -n "${NAMESPACE}" -o wide 2>/dev/null || echo "  Not found"
+  echo ""
+  echo "=== Pod ==="
+  oc get pods -l "app=${NAME}" -n "${NAMESPACE}" -o wide 2>/dev/null || echo "  No pods"
+  echo ""
+  echo "=== Service ==="
+  oc get svc "${NAME}" -n "${NAMESPACE}" 2>/dev/null || echo "  Not found"
+  echo ""
+  echo "=== Route ==="
+  oc get route "${NAME}" -n "${NAMESPACE}" 2>/dev/null || echo "  No route"
+  echo ""
+
+  POD=$(oc get pods -l "app=${NAME}" -n "${NAMESPACE}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  if [[ -n "$POD" ]]; then
+    echo "=== GPU Resources ==="
+    oc get pod "$POD" -n "${NAMESPACE}" -o jsonpath='{.spec.containers[0].resources}' 2>/dev/null | python3 -m json.tool 2>/dev/null || true
+    echo ""
+    echo "=== Model ==="
+    oc get deployment "${NAME}" -n "${NAMESPACE}" -o jsonpath='{.spec.template.spec.containers[0].args}' 2>/dev/null \
+      | python3 -c "import json,sys; args=json.load(sys.stdin); idx=args.index('--model'); print(args[idx+1])" 2>/dev/null || echo "  Unknown"
+  fi
+else
+  echo "vLLM deployments in namespace '${NAMESPACE}':"
+  echo ""
+  oc get deployments -n "${NAMESPACE}" -o wide 2>/dev/null | grep -E '^NAME|vllm' || echo "  None found"
+  echo ""
+  echo "Use --name <deployment> for details."
+fi

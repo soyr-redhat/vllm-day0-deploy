@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/defaults.sh"
+source "${SCRIPT_DIR}/lib/gpu.sh"
+source "${SCRIPT_DIR}/lib/yaml.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: deploy <config-file> [OPTIONS]
+
+Deploy any model on OpenShift with vLLM — point at a config and go.
+
+  ./deploy configs/gemma4-12b.env
+  ./deploy configs/nemotron-ultra.env --dry-run
+  ./deploy configs/gemma4-12b.env --expose --namespace my-ns
+
+The config file sets MODEL, VRAM_GB, and any model-specific settings.
+CLI flags override config values.
+
+Options:
+  --name NAME               Deployment name (default: vllm-<model-slug>)
+  --image IMAGE             vLLM image override
+  --max-model-len LEN       Max context length override
+  --gpu-util FLOAT          GPU memory utilization 0-1
+  --queue QUEUE             Kueue queue name
+  --pvc-size SIZE           Model cache PVC size
+  --pvc-name NAME           PVC name override
+  --gpu-resource RES        Override GPU resource type
+  --gpu-count N             Override GPU count
+  --expose                  Create a Route for external access
+  --dry-run                 Print YAML without applying
+  --namespace NS            Target namespace (default: current project)
+  -h, --help                Show this help
+
+GPU auto-selection (by VRAM_GB in config):
+  ≤18 GB  → mig-1g.18gb (tp=1)    ≤160 GB → gpu x2 (tp=2)
+  ≤35 GB  → mig-3g.71gb (tp=1)    ≤320 GB → gpu x4 (tp=4)
+  ≤80 GB  → gpu x1 (tp=1)         ≤640 GB → gpu x8 (tp=8)
+
+EOF
+  exit 0
+}
+
+[[ $# -eq 0 ]] && usage
+
+# ── Load config file (first positional arg) ───────────────────────────────────
+CONFIG_FILE=""
+if [[ "${1:-}" != -* ]]; then
+  CONFIG_FILE="$1"
+  shift
+fi
+
+if [[ -z "$CONFIG_FILE" ]]; then
+  echo "Error: config file is required as the first argument" >&2
+  echo "Usage: deploy <config-file> [OPTIONS]" >&2
+  exit 1
+fi
+
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  echo "Error: config file not found: $CONFIG_FILE" >&2
+  exit 1
+fi
+
+source "$CONFIG_FILE"
+
+# ── CLI overrides ─────────────────────────────────────────────────────────────
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --name)            NAME="$2";              shift 2 ;;
+    --image)           IMAGE="$2";             shift 2 ;;
+    --max-model-len)   MAX_MODEL_LEN="$2";     shift 2 ;;
+    --max-batch-tokens) MAX_BATCH_TOKENS="$2"; shift 2 ;;
+    --max-seqs)        MAX_SEQS="$2";          shift 2 ;;
+    --gpu-util)        GPU_UTIL="$2";          shift 2 ;;
+    --queue)           QUEUE="$2";             shift 2 ;;
+    --hf-secret)       HF_SECRET="$2";        shift 2 ;;
+    --hf-secret-key)   HF_SECRET_KEY="$2";    shift 2 ;;
+    --pvc-size)        PVC_SIZE="$2";          shift 2 ;;
+    --pvc-name)        PVC_NAME="$2";          shift 2 ;;
+    --storage-class)   STORAGE_CLASS="$2";     shift 2 ;;
+    --gpu-resource)    GPU_RESOURCE_OVERRIDE="$2"; shift 2 ;;
+    --gpu-count)       GPU_COUNT_OVERRIDE="$2"; shift 2 ;;
+    --expose)          EXPOSE=true;            shift ;;
+    --dry-run)         DRY_RUN=true;           shift ;;
+    --namespace)       NAMESPACE="$2";         shift 2 ;;
+    -h|--help)         usage ;;
+    *) echo "Error: unknown option: $1" >&2; exit 1 ;;
+  esac
+done
+
+# ── Validate ──────────────────────────────────────────────────────────────────
+[[ -z "${MODEL:-}" ]] && { echo "Error: MODEL not set in config" >&2; exit 1; }
+[[ -z "${VRAM_GB:-}" ]] && { echo "Error: VRAM_GB not set in config" >&2; exit 1; }
+
+[[ -z "${NAME:-}" ]] && NAME="vllm-$(derive_name "$MODEL")"
+[[ -z "${PVC_NAME:-}" ]] && PVC_NAME="${NAME}-model-cache"
+
+if [[ -z "${NAMESPACE:-}" ]]; then
+  NAMESPACE=$(oc project -q 2>/dev/null) || { echo "Error: not logged into OpenShift" >&2; exit 1; }
+fi
+
+select_gpu "$VRAM_GB" "${GPU_RESOURCE_OVERRIDE:-}" "${GPU_COUNT_OVERRIDE:-}"
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+cat <<EOF
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  vLLM Day-0 Deploy
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Config:      $CONFIG_FILE
+  Model:       $MODEL
+  Name:        $NAME
+  Namespace:   $NAMESPACE
+  Image:       $IMAGE
+  GPU:         ${GPU_RESOURCE} x${GPU_COUNT} (tp=${TP_SIZE})
+  VRAM:        ${VRAM_GB}GB
+  Context:     ${MAX_MODEL_LEN} tokens
+  Queue:       $QUEUE
+  PVC:         $PVC_NAME (${PVC_SIZE})
+  Expose:      $EXPOSE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+EOF
+
+# ── Apply ─────────────────────────────────────────────────────────────────────
+YAML=$(generate_all_yaml)
+
+if [[ "$DRY_RUN" == true ]]; then
+  echo "$YAML"
+  exit 0
+fi
+
+echo "$YAML" | oc apply -f -
+echo ""
+echo "Deployment created. Watch progress:"
+echo "  oc get pods -l app=${NAME} -w"
+echo ""
+echo "Logs:"
+echo "  oc logs -f deployment/${NAME}"
+echo ""
+echo "Test (once ready):"
+if [[ "$EXPOSE" == true ]]; then
+  echo "  curl https://${NAME}-${NAMESPACE}.apps.ocp.cloud.rhai-tmm.dev/v1/models"
+else
+  echo "  oc port-forward svc/${NAME} 8000:8000"
+  echo "  curl http://localhost:8000/v1/models"
+fi

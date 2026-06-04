@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: teardown --name NAME [OPTIONS]
+
+Remove a vLLM day-0 deployment.
+
+Required:
+  --name NAME           Deployment name to remove
+
+Optional:
+  --keep-pvc            Preserve the model cache PVC
+  --pvc-name NAME       PVC name if non-default (default: <name>-model-cache)
+  --namespace NS        Target namespace (default: current project)
+  -y, --yes             Skip confirmation
+  -h, --help            Show this help
+
+EOF
+  exit 0
+}
+
+NAME=""
+KEEP_PVC=false
+PVC_NAME=""
+NAMESPACE=""
+SKIP_CONFIRM=false
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --name)       NAME="$2";      shift 2 ;;
+    --keep-pvc)   KEEP_PVC=true;  shift ;;
+    --pvc-name)   PVC_NAME="$2";  shift 2 ;;
+    --namespace)  NAMESPACE="$2"; shift 2 ;;
+    -y|--yes)     SKIP_CONFIRM=true; shift ;;
+    -h|--help)    usage ;;
+    *) echo "Error: unknown option: $1" >&2; exit 1 ;;
+  esac
+done
+
+[[ -z "$NAME" ]] && { echo "Error: --name is required" >&2; exit 1; }
+
+if [[ -z "$NAMESPACE" ]]; then
+  NAMESPACE=$(oc project -q 2>/dev/null) || { echo "Error: not logged into OpenShift" >&2; exit 1; }
+fi
+
+[[ -z "$PVC_NAME" ]] && PVC_NAME="${NAME}-model-cache"
+
+echo "Removing from namespace '${NAMESPACE}':"
+echo "  Deployment: ${NAME}"
+echo "  Service:    ${NAME}"
+echo "  Route:      ${NAME} (if exists)"
+if [[ "$KEEP_PVC" == false ]]; then
+  echo "  PVC:        ${PVC_NAME}"
+else
+  echo "  PVC:        ${PVC_NAME} (keeping)"
+fi
+echo ""
+
+if [[ "$SKIP_CONFIRM" == false ]]; then
+  read -rp "Proceed? [y/N] " confirm
+  [[ "$confirm" =~ ^[yY]$ ]] || { echo "Cancelled."; exit 0; }
+fi
+
+oc delete route "${NAME}" -n "${NAMESPACE}" --ignore-not-found 2>/dev/null || true
+oc delete svc "${NAME}" -n "${NAMESPACE}" --ignore-not-found
+oc delete deployment "${NAME}" -n "${NAMESPACE}" --ignore-not-found
+
+if [[ "$KEEP_PVC" == false ]]; then
+  oc delete pvc "${PVC_NAME}" -n "${NAMESPACE}" --ignore-not-found
+fi
+
+echo ""
+echo "Done."
