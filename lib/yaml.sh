@@ -28,8 +28,6 @@ generate_deployment_yaml() {
     done
   fi
 
-  # Build extra env vars YAML from EXTRA_ENV array
-  # Config files define: EXTRA_ENV=("KEY=value" "KEY2=value2")
   local extra_env_yaml=""
   if [[ ${#EXTRA_ENV[@]:-0} -gt 0 ]]; then
     for entry in "${EXTRA_ENV[@]}"; do
@@ -41,12 +39,23 @@ generate_deployment_yaml() {
     done
   fi
 
-  # Served model name - use SERVED_MODEL_NAME if set, otherwise skip
   local served_name_yaml=""
   if [[ -n "${SERVED_MODEL_NAME:-}" ]]; then
     served_name_yaml="
             - \"--served-model-name\"
             - \"${SERVED_MODEL_NAME}\""
+  fi
+
+  local chunked_prefill_yaml=""
+  if [[ "${CHUNKED_PREFILL:-true}" == true ]]; then
+    chunked_prefill_yaml="
+            - \"--enable-chunked-prefill\""
+  fi
+
+  local prefix_caching_yaml=""
+  if [[ "${PREFIX_CACHING:-true}" == true ]]; then
+    prefix_caching_yaml="
+            - \"--enable-prefix-caching\""
   fi
 
   cat <<EOF
@@ -87,9 +96,7 @@ spec:
             - "--max-model-len"
             - "${MAX_MODEL_LEN}"
             - "--gpu-memory-utilization"
-            - "${GPU_UTIL}"
-            - "--enable-chunked-prefill"
-            - "--enable-prefix-caching"
+            - "${GPU_UTIL}"${chunked_prefill_yaml}${prefix_caching_yaml}
             - "--max-num-batched-tokens"
             - "${MAX_BATCH_TOKENS}"
             - "--max-num-seqs"
