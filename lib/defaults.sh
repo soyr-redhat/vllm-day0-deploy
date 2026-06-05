@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Default configuration values
 
-IMAGE="vllm/vllm-openai:latest"
+IMAGE=""
+IMAGE_PULL_SECRET=""
 MAX_MODEL_LEN="8192"
 MAX_BATCH_TOKENS="16384"
 MAX_SEQS="256"

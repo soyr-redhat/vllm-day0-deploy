@@ -77,7 +77,9 @@ spec:
       labels:
         app: ${NAME}
         kueue.x-k8s.io/queue-name: ${QUEUE}
-    spec:
+    spec:$(if [[ -n "${IMAGE_PULL_SECRET:-}" ]]; then echo "
+      imagePullSecrets:
+        - name: ${IMAGE_PULL_SECRET}"; fi)
       tolerations:
         - key: nvidia.com/gpu
           operator: Exists

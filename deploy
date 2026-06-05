@@ -94,6 +94,37 @@ done
 [[ -z "${MODEL:-}" ]] && { echo "Error: MODEL not set in config" >&2; exit 1; }
 [[ -z "${VRAM_GB:-}" ]] && { echo "Error: VRAM_GB not set in config" >&2; exit 1; }
 
+# ── Prompt for image if not set in config or CLI ──────────────────────────────
+if [[ -z "${IMAGE:-}" ]]; then
+  echo "No IMAGE set in config."
+  read -rp "Paste the vLLM container image (e.g. quay.io/org/repo:tag): " IMAGE
+  [[ -z "$IMAGE" ]] && { echo "Error: image is required" >&2; exit 1; }
+
+  read -rp "Does this image require pull authentication? [y/N] " needs_auth
+  if [[ "$needs_auth" =~ ^[yY]$ ]]; then
+    existing=$(oc get secret -o name 2>/dev/null | grep -o '[^/]*$' | grep -i pull || true)
+    if [[ -n "$existing" ]]; then
+      echo "Existing pull secrets in namespace:"
+      echo "$existing" | sed 's/^/  /'
+      echo ""
+    fi
+    read -rp "Pull secret name (existing or new): " IMAGE_PULL_SECRET
+
+    if ! oc get secret "$IMAGE_PULL_SECRET" &>/dev/null; then
+      echo "Secret '$IMAGE_PULL_SECRET' not found. Creating it..."
+      read -rp "Registry server (e.g. quay.io): " reg_server
+      read -rp "Username: " reg_user
+      read -rsp "Password: " reg_pass
+      echo ""
+      oc create secret docker-registry "$IMAGE_PULL_SECRET" \
+        --docker-server="$reg_server" \
+        --docker-username="$reg_user" \
+        --docker-password="$reg_pass"
+      echo "Secret '$IMAGE_PULL_SECRET' created."
+    fi
+  fi
+fi
+
 [[ -z "${NAME:-}" ]] && NAME="vllm-$(derive_name "$MODEL")"
 [[ -z "${PVC_NAME:-}" ]] && PVC_NAME="${NAME}-model-cache"
 
